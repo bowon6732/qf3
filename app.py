@@ -41,12 +41,49 @@ def _workcenter_from_head(h: dict) -> str:
     return (h.get("createdBy") or "").strip()
 
 
+def _parse_and_tokens(q: str) -> List[str]:
+    """
+    품목명 검색:
+      - "A%B%C" => ["A","B","C"] (AND)
+      - 빈 토큰은 제거
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    parts = [p.strip() for p in q.split("%")]
+    tokens = [p for p in parts if p]
+    return tokens
+
+
+def _filter_heads_by_item_name(heads: list, item_name_q: str) -> list:
+    """
+    heads(list[dict])에서 itemName에 대해 AND 포함검색 적용
+    """
+    tokens = _parse_and_tokens(item_name_q)
+    if not tokens:
+        return heads
+
+    out = []
+    for h in heads:
+        name = (h.get("itemName") or "")
+        name_l = name.lower()
+        ok = True
+        for t in tokens:
+            if t.lower() not in name_l:
+                ok = False
+                break
+        if ok:
+            out.append(h)
+    return out
+
+
 def _excel_one_sheet_item_then_results(heads2: list, client: QF3Client, progress_cb=None) -> bytes:
     """
     한 시트 구조:
       - 품목 행 1줄(구분=품목)
       - 바로 아래에 해당 품목 검사결과(구분=검사) 여러 줄
       - 다음 품목 반복
+    ※ 요청 반영: 품목 사이 '완전 빈 행'은 넣지 않음
     """
     wb = Workbook()
     ws = wb.active
@@ -113,9 +150,9 @@ def _excel_one_sheet_item_then_results(heads2: list, client: QF3Client, progress
                 ])
                 row_num += 1
 
-        # 품목 단위로 빈 줄 1줄
-        ws.append(["", "", "", "", "", "", "", "", "", "", ""])
-        row_num += 1
+        # ✅ 요청 반영: 품목 단위로 넣던 '완전 빈 줄' 제거
+        # ws.append(["", "", "", "", "", "", "", "", "", "", ""])
+        # row_num += 1
 
         if progress_cb:
             progress_cb(i, total)
@@ -185,7 +222,8 @@ client: QF3Client = st.session_state.client
 # ---------------- Filters ----------------
 st.subheader("조회")
 
-f1, f2, f3, f4, f5, f6 = st.columns([1.2, 1.4, 1.4, 1.3, 1.2, 1.6])
+# ✅ 품목명 검색칸 추가로 컬럼 하나 늘림
+f1, f2, f3, f4, f5, f6, f7 = st.columns([1.1, 1.25, 1.25, 1.2, 1.05, 1.2, 1.75])
 with f1:
     st.selectbox("공장", ["본사,주덕공장"], index=0, disabled=True)
 with f2:
@@ -198,6 +236,8 @@ with f5:
     operation_code = st.text_input("공정코드(operationCode)", value="")
 with f6:
     item_code = st.text_input("품목코드(itemCode)", value="")
+with f7:
+    item_name_q = st.text_input("품목명(itemName)  (예: AR%NNB = AND검색)", value="")
 
 g1, g2, g3 = st.columns([1.8, 1.2, 7.0])
 with g1:
@@ -228,6 +268,9 @@ if do_query:
     try:
         job_mp = client.build_job_equipment_map(released_date_from=released_from, released_date_to=released_to)
 
+        # API에 item_name 파라미터가 확실치 않아서,
+        # 1) 서버 조회는 기존처럼 가져오고
+        # 2) 품목명은 로컬에서 AND 필터 적용
         if fetch_all:
             heads = client.fetch_all_heads(
                 inspection_date_from=inspection_date_from,
@@ -257,6 +300,9 @@ if do_query:
             heads = client._extract_list(resp)
 
         heads2 = client.attach_equipment_to_heads(heads, job_mp)
+
+        # ✅ 품목명 AND 필터 적용 (예: AR%NNB)
+        heads2 = _filter_heads_by_item_name(heads2, item_name_q)
 
         head_cols = [
             "jobName", "operationNum", "operationCode",
@@ -350,10 +396,14 @@ if st.button("엑셀 다운로드(조회조건 전체)", use_container_width=Tru
         )
         heads2 = client.attach_equipment_to_heads(heads, job_mp)
 
+        # ✅ 조회화면과 동일하게 품목명 AND 필터도 반영
+        heads2 = _filter_heads_by_item_name(heads2, item_name_q)
+
         if not heads2:
             raise RuntimeError("다운로드할 데이터가 없습니다. 조회조건을 확인하세요.")
 
         prog = st.progress(0)
+
         def _cb(i, total):
             prog.progress(min(1.0, i / max(1, total)))
 
